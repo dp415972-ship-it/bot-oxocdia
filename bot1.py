@@ -62,6 +62,15 @@ def run_logic():
     save_data(HISTORY_FILE, game_history)
     return res, outcome, detail
 
+# --- BÀN PHÍM CHƠI GAME ---
+def get_game_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton('Chẵn'), KeyboardButton('Lẻ')],
+        [KeyboardButton('3 Trắng 1 Đỏ (x3.5)'), KeyboardButton('3 Đỏ 1 Trắng (x3.5)')],
+        [KeyboardButton('4 Trắng (x12)'), KeyboardButton('4 Đỏ (x12)')],
+        [KeyboardButton('🔙 Quay lại')]
+    ], resize_keyboard=True)
+
 # --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -74,7 +83,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton('💳 Nạp Tiền'), KeyboardButton('🏧 Rút Tiền')],
         [KeyboardButton('📊 Tài Khoản'), KeyboardButton('📜 Hướng Dẫn')]
     ]
-    # Kiểm tra Admin để hiện nút
     if user.id in ADMIN_IDS:
         kb.append([KeyboardButton('🛠 Quản Trị')])
     
@@ -102,7 +110,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_users = len(players)
         total_balance = sum(u['balance'] for u in players.values())
         
-        # Tạo Menu Admin bằng nút bấm Inline
         keyboard = [
             [InlineKeyboardButton("👥 Danh Sách Người Chơi", callback_data="admin_list")],
             [InlineKeyboardButton("💰 Cộng/Trừ Tiền", callback_data="admin_setbal")],
@@ -120,8 +127,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Chơi Game
     if text == '🎮 Chơi Game':
-        kb = [[KeyboardButton('Chẵn'), KeyboardButton('Lẻ')], [KeyboardButton('3 Trắng 1 Đỏ (x3.5)'), KeyboardButton('3 Đỏ 1 Trắng (x3.5)')], [KeyboardButton('4 Trắng (x12)'), KeyboardButton('4 Đỏ (x12)')], [KeyboardButton('🔙 Quay lại')]]
-        return await update.message.reply_text("🎲 Chọn cửa đặt:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+        return await update.message.reply_text("🎲 Chọn cửa đặt:", reply_markup=get_game_keyboard())
 
     if text in MULTIPLIERS:
         user_states[uid] = {'state': 'BET_AMT', 'choice': text}
@@ -129,16 +135,20 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if uid in user_states and user_states[uid]['state'] == 'BET_AMT':
         try:
-            amt = int("".join(filter(str.isdigit, text)))
+            amt_text = "".join(filter(str.isdigit, text))
+            if not amt_text: return
+            amt = int(amt_text)
             choice = user_states[uid]['choice']
-            if p['balance'] < amt: return await update.message.reply_text("❌ Không đủ tiền!")
+            
+            if p['balance'] < amt: 
+                return await update.message.reply_text("❌ Không đủ tiền!", reply_markup=get_game_keyboard())
             
             p['balance'] -= amt
             save_data(DATA_FILE, players)
-            user_states.pop(uid, None)
+            user_states.pop(uid, None) # Xóa trạng thái nhập tiền để sẵn sàng cho lượt tiếp theo
             
             msg = await update.message.reply_text(f"🎲 Đang xóc...")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.2)
             
             res, out, det = run_logic()
             win = (BET_MAP[choice] == out or BET_MAP[choice] == det)
@@ -151,11 +161,15 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: res_msg += f"💀 THUA: `-{amt:,}`"
             
             save_data(DATA_FILE, players)
+            # Sau khi trả kết quả, gửi lại bàn phím chọn cửa ngay lập tức
             await msg.edit_text(res_msg + f"\n💰 Dư: `{p['balance']:,}`", parse_mode='Markdown')
+            await update.message.reply_text("🎲 Mời bạn đặt tiếp lượt mới:", reply_markup=get_game_keyboard())
             return
-        except: return
+        except Exception as e:
+            logger.error(f"Error in betting: {e}")
+            return
 
-    # Nạp/Rút
+    # Nạp/Rút (Giữ nguyên logic cũ)
     if text == '💳 Nạp Tiền':
         user_states[uid] = {'state': 'NAP'}
         return await update.message.reply_text("🏦 Nhập số tiền nạp:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
@@ -203,7 +217,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == '📊 Tài Khoản':
         await update.message.reply_text(f"👤: {p['username']}\n🆔: `{uid}`\n💰: `{p['balance']:,}` VNĐ", parse_mode='Markdown')
 
-# --- LỆNH ADMIN (GÕ TAY) ---
+# --- LỆNH ADMIN ---
 async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
     try:
@@ -220,7 +234,6 @@ async def cb_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split("_")
     action = data[0]
     
-    # Xử lý các chức năng Admin mới
     if action == "admin":
         sub = data[1]
         if sub == "stats":
@@ -240,7 +253,6 @@ async def cb_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
         return
 
-    # Duyệt nạp/rút tiền
     if action == "ap":
         tid, amt = data[1], int(data[2])
         players[tid]['balance'] += amt
