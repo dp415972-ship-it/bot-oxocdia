@@ -3,253 +3,322 @@ import json
 import os
 import random
 import asyncio
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, 
-    ContextTypes, 
-    CommandHandler, 
-    MessageHandler, 
-    CallbackQueryHandler, 
-    filters
-)
-from telegram.constants import ParseMode
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-# --- CONFIGURATION ---
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_IDS = [8393067202]
-ADMIN_USERNAME = "@admin_casino_pro" 
-BANK_INFO = {
-    "name": "MBBank",
-    "stk": "144881",
-    "owner": "NGUYEN VAN A"
-}
-DATA_FILE = 'database.json'
+# --- CẤU HÌNH ---
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8747823218:AAE5clUs5rSf-bF_MTQkxlnFiWk3LUUS8AY')
+ADMIN_IDS = [8393067202] 
+BANK_STK = '144881'
+BANK_NAME = 'MBBank'
 
-# --- CONSTANTS ---
-INITIAL_BALANCE = 50000     
-MIN_BET = 1000              
-REF_COMMISSION = 0.10       
-DAILY_BONUS = 5000          
+DATA_FILE = 'players.json'
+HISTORY_FILE = 'history.json'
+INITIAL_BALANCE = 50000
 
-# Logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- DATABASE ---
-class Database:
-    def __init__(self, filename):
-        self.filename = filename
-        self.data = self.load()
+# --- QUẢN LÝ DỮ LIỆU ---
+def load_data(file, default):
+    if os.path.exists(file):
+        try:
+            with open(file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except: return default
+    return default
 
-    def load(self):
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except: return self.get_empty_schema()
-        return self.get_empty_schema()
+def save_data(file, data):
+    with open(file, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
-    def get_empty_schema(self):
-        return {"players": {}, "transactions": []}
+players = load_data(DATA_FILE, {})
+game_history = load_data(HISTORY_FILE, [])
+user_states = {}
 
-    def save(self):
-        with open(self.filename, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=4)
+def get_player(user):
+    uid = str(user.id)
+    if uid not in players:
+        players[uid] = {
+            "id": user.id, 
+            "username": user.username or user.first_name, 
+            "balance": INITIAL_BALANCE,
+            "play_history": [] # Thêm mảng lưu lịch sử chơi riêng
+        }
+        save_data(DATA_FILE, players)
+    if "play_history" not in players[uid]:
+        players[uid]["play_history"] = []
+    return players[uid]
 
-    def get_player(self, user, ref_id=None):
-        uid = str(user.id)
-        if uid not in self.data["players"]:
-            self.data["players"][uid] = {
-                "id": user.id,
-                "username": user.username or user.first_name,
-                "balance": INITIAL_BALANCE,
-                "total_deposit": 0,
-                "total_bet": 0,
-                "total_win": 0,
-                "ref_by": ref_id if (ref_id and ref_id != uid and ref_id in self.data["players"]) else None,
-                "ref_count": 0,
-                "ref_earnings": 0,
-                "last_checkin": None,
-                "history": []
-            }
-            if ref_id and ref_id in self.data["players"]:
-                self.data["players"][ref_id]["ref_count"] += 1
-            self.save()
-        return self.data["players"][uid]
+# --- LOGIC GAME ---
+ITEMS = ['⚪️', '🔴']
+MULTIPLIERS = {'Chẵn': 1.95, 'Lẻ': 1.95, '4 Trắng (x12)': 12, '4 Đỏ (x12)': 12, '3 Trắng 1 Đỏ (x3.5)': 3.5, '3 Đỏ 1 Trắng (x3.5)': 3.5}
+BET_MAP = {'Chẵn': 'chan', 'Lẻ': 'le', '4 Trắng (x12)': '4trang', '4 Đỏ (x12)': '4do', '3 Trắng 1 Đỏ (x3.5)': '3trang1do', '3 Đỏ 1 Trắng (x3.5)': '3do1trang'}
 
-db = Database(DATA_FILE)
+def run_logic():
+    res = [random.choice(ITEMS) for _ in range(4)]
+    reds = res.count('🔴')
+    outcome = "chan" if reds % 2 == 0 else "le"
+    detail = ""
+    if reds == 4: detail = "4do"
+    elif reds == 0: detail = "4trang"
+    elif reds == 1: detail = "3trang1do"
+    elif reds == 3: detail = "3do1trang"
+    
+    # Lịch sử cầu chung (vẫn giữ để tính toán nếu cần)
+    game_history.append({"result": "".join(res), "outcome": outcome})
+    if len(game_history) > 100: game_history.pop(0)
+    save_data(HISTORY_FILE, game_history)
+    
+    return res, outcome, detail
 
-# --- GAME LOGIC ---
-class GameEngine:
-    @staticmethod
-    def roll_xoc_dia():
-        items = [random.choice(['⚪️', '🔴']) for _ in range(4)]
-        reds = items.count('🔴')
-        outcome = "chan" if reds % 2 == 0 else "le"
-        detail = {4: "4do", 0: "4trang", 3: "3do", 1: "3trang"}.get(reds, "2do2trang")
-        return items, outcome, detail
+# --- BÀN PHÍM ---
+def get_game_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton('Chẵn'), KeyboardButton('Lẻ')],
+        [KeyboardButton('3 Trắng 1 Đỏ (x3.5)'), KeyboardButton('3 Đỏ 1 Trắng (x3.5)')],
+        [KeyboardButton('4 Trắng (x12)'), KeyboardButton('4 Đỏ (x12)')],
+        [KeyboardButton('🔙 Quay lại')]
+    ], resize_keyboard=True)
 
-    @staticmethod
-    def roll_tai_xiu():
-        dices = [random.randint(1, 6) for _ in range(3)]
-        total = sum(dices)
-        if dices[0] == dices[1] == dices[2]: return dices, total, "triple"
-        return dices, total, "tai" if total >= 11 else "xiu"
-
-    @staticmethod
-    def play_slot():
-        icons = ["🍎", "🍊", "🍇", "🔔", "💎", "7️⃣"]
-        result = [random.choice(icons) for _ in range(3)]
-        if result[0] == result[1] == result[2]:
-            return result, 10 if result[0] == "7️⃣" else 5
-        if result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
-            return result, 2
-        return result, 0
-
-# --- UI MANAGER ---
-class UIManager:
-    @staticmethod
-    def format_money(n): return "{:,.0f}".format(n)
-
-    @staticmethod
-    def main_menu(player):
-        kb = [
-            [InlineKeyboardButton("🎮 SẢNH TRÒ CHƠI", callback_data="view_lobby")],
-            [InlineKeyboardButton("💳 NẠP TIỀN", callback_data="view_deposit"), InlineKeyboardButton("🏧 RÚT TIỀN", callback_data="view_withdraw")],
-            [InlineKeyboardButton("🎁 NHIỆM VỤ", callback_data="view_tasks"), InlineKeyboardButton("👥 ĐẠI LÝ", callback_data="view_affiliate")],
-            [InlineKeyboardButton("👤 TÀI KHOẢN", callback_data="view_profile"), InlineKeyboardButton("📊 LỊCH SỬ", callback_data="view_history")]
-        ]
-        return InlineKeyboardMarkup(kb)
-
-    @staticmethod
-    def lobby_menu():
-        kb = [
-            [InlineKeyboardButton("🎲 XÓC ĐĨA", callback_data="game_xd_lobby"), InlineKeyboardButton("🔥 TÀI XỈU", callback_data="game_tx_lobby")],
-            [InlineKeyboardButton("🎰 MINI SLOT", callback_data="game_slot_lobby"), InlineKeyboardButton("🃏 BACCARAT", callback_data="game_bc_lobby")],
-            [InlineKeyboardButton("🔙 QUAY LẠI", callback_data="view_main")]
-        ]
-        return InlineKeyboardMarkup(kb)
+def get_deposit_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton('50,000'), KeyboardButton('100,000')],
+        [KeyboardButton('200,000'), KeyboardButton('500,000')],
+        [KeyboardButton('1,000,000'), KeyboardButton('2,000,000')],
+        [KeyboardButton('🔙 Quay lại Menu')]
+    ], resize_keyboard=True)
 
 # --- HANDLERS ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    ref_id = context.args[0].replace("ref_", "") if context.args and "ref_" in context.args[0] else None
-    player = db.get_player(user, ref_id)
-    msg = f"👋 Chào **{player['username']}**\n💰 Số dư: `{UIManager.format_money(player['balance'])}` VNĐ\nHệ thống Casino uy tín hàng đầu Telegram."
+    p = get_player(user)
+    uid = str(user.id)
+    user_states.pop(uid, None)
     
-    if update.message: await update.message.reply_text(msg, reply_markup=UIManager.main_menu(player), parse_mode=ParseMode.MARKDOWN)
-    else: await update.callback_query.edit_message_text(msg, reply_markup=UIManager.main_menu(player), parse_mode=ParseMode.MARKDOWN)
-
-async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    user = update.effective_user
-    player = db.get_player(user)
-    await query.answer()
-
-    if data == "view_main": await start_command(update, context)
-    elif data == "view_lobby":
-        await query.edit_message_text("🎮 **SẢNH TRÒ CHƠI**", reply_markup=UIManager.lobby_menu(), parse_mode=ParseMode.MARKDOWN)
+    kb = [
+        [KeyboardButton('🎮 Chơi Game'), KeyboardButton('📝 Lịch Sử Chơi')],
+        [KeyboardButton('💳 Nạp Tiền'), KeyboardButton('🏧 Rút Tiền')],
+        [KeyboardButton('📊 Tài Khoản'), KeyboardButton('📜 Hướng Dẫn')]
+    ]
+    if user.id in ADMIN_IDS:
+        kb.append([KeyboardButton('🛠 Quản Trị')])
     
-    # --- XOC DIA LOBBY ---
-    elif data == "game_xd_lobby":
-        kb = [
-            [InlineKeyboardButton("CHẴN (x1.96)", callback_data="bet_xd_chan"), InlineKeyboardButton("LẺ (x1.96)", callback_data="bet_xd_le")],
-            [InlineKeyboardButton("3 TRẮNG (x3.8)", callback_data="bet_xd_3trang"), InlineKeyboardButton("3 ĐỎ (x3.8)", callback_data="bet_xd_3do")],
-            [InlineKeyboardButton("4 TRẮNG (x15)", callback_data="bet_xd_4trang"), InlineKeyboardButton("4 ĐỎ (x15)", callback_data="bet_xd_4do")],
-            [InlineKeyboardButton("🔙 QUAY LẠI", callback_data="view_lobby")]
-        ]
-        await query.edit_message_text(f"🎲 **XÓC ĐĨA**\nSố dư: `{UIManager.format_money(player['balance'])}` VNĐ\nChọn cửa muốn đặt:", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        f"🎰 **XÓC ĐĨA PRO** 🎰\n👤: {p['username']}\n💰: `{p['balance']:,}` VNĐ",
+        reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
+        parse_mode='Markdown'
+    )
 
-    # --- TAI XIU LOBBY ---
-    elif data == "game_tx_lobby":
-        kb = [
-            [InlineKeyboardButton("TÀI (x1.96)", callback_data="bet_tx_tai"), InlineKeyboardButton("XỈU (x1.96)", callback_data="bet_tx_xiu")],
-            [InlineKeyboardButton("BÃO (x35)", callback_data="bet_tx_triple")],
-            [InlineKeyboardButton("🔙 QUAY LẠI", callback_data="view_lobby")]
-        ]
-        await query.edit_message_text(f"🔥 **TÀI XỈU**\nSố dư: `{UIManager.format_money(player['balance'])}` VNĐ\nChọn cửa muốn đặt:", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-
-    # --- INPUT BET TRIGGER ---
-    elif data.startswith("bet_"):
-        game_type, door = data.split("_")[1], data.split("_")[2]
-        context.user_data['bet_flow'] = {"type": game_type, "door": door}
-        context.user_data['state'] = "wait_amount"
-        await query.message.reply_text(f"🎯 Bạn chọn đặt cửa: **{door.upper()}**\n👉 Vui lòng nhập số tiền muốn cược (Ví dụ: 10000):")
-
-    # --- PROFILE & TASKS ---
-    elif data == "view_profile":
-        msg = (f"👤 **THÔNG TIN TÀI KHOẢN**\n\n"
-               f"ID: `{user.id}`\nSố dư: `{UIManager.format_money(player['balance'])}` VNĐ\n"
-               f"Tổng nạp: `{UIManager.format_money(player['total_deposit'])}` VNĐ\n"
-               f"Tổng cược: `{UIManager.format_money(player['total_bet'])}` VNĐ")
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 QUAY LẠI", callback_data="view_main")]]), parse_mode=ParseMode.MARKDOWN)
-
-    elif data == "view_tasks":
-        kb = [[InlineKeyboardButton("📆 ĐIỂM DANH HÀNG NGÀY", callback_data="act_checkin")], [InlineKeyboardButton("🔙 QUAY LẠI", callback_data="view_main")]]
-        await query.edit_message_text("🎁 **NHIỆM VỤ & QUÀ TẶNG**\nĐiểm danh mỗi ngày để nhận tiền miễn phí!", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif data == "act_checkin":
-        today = datetime.now().strftime("%Y-%m-%d")
-        if player.get("last_checkin") == today:
-            await query.message.reply_text("❌ Hôm nay bạn đã điểm danh rồi!")
-        else:
-            player["last_checkin"] = today
-            player["balance"] += DAILY_BONUS
-            db.save()
-            await query.message.reply_text(f"✅ Điểm danh thành công! Bạn nhận được +{UIManager.format_money(DAILY_BONUS)} VNĐ")
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    player = db.get_player(user)
-    
-    if context.user_data.get('state') == "wait_amount":
-        try:
-            amount = int("".join(filter(str.isdigit, text)))
-            if amount < MIN_BET: return await update.message.reply_text(f"❌ Cược tối thiểu là {MIN_BET}")
-            if player['balance'] < amount: return await update.message.reply_text("❌ Số dư không đủ!")
-            
-            flow = context.user_data.get('bet_flow')
-            player['balance'] -= amount
-            player['total_bet'] += amount
-            context.user_data['state'] = None # Reset state
-            
-            # --- LOGIC XỬ LÝ KẾT QUẢ ---
-            if flow['type'] == "xd":
-                items, out, detail = GameEngine.roll_xoc_dia()
-                win = (flow['door'] == out) if flow['door'] in ['chan', 'le'] else (flow['door'] == detail)
-                mult = 1.96 if flow['door'] in ['chan', 'le'] else (15 if "4" in flow['door'] else 3.8)
-                res_msg = f"🎲 Kết quả: `{' '.join(items)}` -> **{out.upper()}**\n"
-            else: # Tai Xiu
-                dices, total, out = GameEngine.roll_tai_xiu()
-                win = (flow['door'] == out)
-                mult = 35 if flow['door'] == "triple" else 1.96
-                res_msg = f"🔥 Kết quả: `{' + '.join(map(str, dices))} = {total}` -> **{out.upper()}**\n"
+    user = update.effective_user
+    uid = str(user.id)
+    p = get_player(user)
 
+    if text in ['🔙 Quay lại', '🔙 Quay lại Menu']:
+        user_states.pop(uid, None)
+        return await start(update, context)
+
+    # --- QUẢN TRỊ ---
+    if text == '🛠 Quản Trị':
+        if user.id not in ADMIN_IDS:
+            return await update.message.reply_text("❌ Bạn không có quyền Admin.")
+        total_users = len(players)
+        total_balance = sum(u['balance'] for u in players.values())
+        keyboard = [
+            [InlineKeyboardButton("👥 Danh Sách Người Chơi", callback_data="admin_list")],
+            [InlineKeyboardButton("💰 Cộng/Trừ Tiền", callback_data="admin_setbal")],
+            [InlineKeyboardButton("📊 Làm Mới Thống Kê", callback_data="admin_stats")]
+        ]
+        return await update.message.reply_text(
+            f"🛠 **HỆ THỐNG QUẢN TRỊ**\n\n👥 Tổng người chơi: `{total_users}`\n💵 Tổng số dư khách: `{total_balance:,}` VNĐ",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
+        )
+
+    # --- CHƠI GAME ---
+    if text == '🎮 Chơi Game':
+        return await update.message.reply_text("🎲 Chọn cửa đặt:", reply_markup=get_game_keyboard())
+
+    if text in MULTIPLIERS:
+        user_states[uid] = {'state': 'BET_AMT', 'choice': text}
+        return await update.message.reply_text(f"🎯 Cửa: {text}\n💰 Nhập tiền cược (Ví dụ: 50000):", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
+
+    if uid in user_states and user_states[uid]['state'] == 'BET_AMT':
+        try:
+            amt_text = "".join(filter(str.isdigit, text))
+            if not amt_text: return
+            amt = int(amt_text)
+            choice = user_states[uid]['choice']
+            if p['balance'] < amt: 
+                return await update.message.reply_text("❌ Không đủ tiền!", reply_markup=get_game_keyboard())
+            
+            p['balance'] -= amt
+            save_data(DATA_FILE, players)
+            user_states.pop(uid, None)
+            
+            msg = await update.message.reply_text(f"🎲 Đang xóc...")
+            await asyncio.sleep(1.2)
+            
+            res, out, det = run_logic()
+            win = (BET_MAP[choice] == out or BET_MAP[choice] == det)
+            
+            result_str = "".join(res)
+            change_str = ""
+            
+            res_msg = f"Kết quả: [ {' '.join(res)} ]\n➜ **{out.upper()}**\n"
             if win:
-                win_amt = int(amount * mult)
-                player['balance'] += win_amt
-                player['total_win'] += win_amt
-                res_msg += f"✨ **THẮNG:** `+{UIManager.format_money(win_amt)}` VNĐ"
+                win_amt = int(amt * MULTIPLIERS[choice])
+                p['balance'] += win_amt
+                res_msg += f"🎉 THẮNG: `+{win_amt:,}`"
+                change_str = f"+{(win_amt - amt):,}"
             else:
-                res_msg += f"💀 **THUA:** `-{UIManager.format_money(amount)}` VNĐ"
+                res_msg += f"💀 THUA: `-{amt:,}`"
+                change_str = f"-{amt:,}"
             
-            db.save()
-            await update.message.reply_text(res_msg, parse_mode=ParseMode.MARKDOWN)
-            await start_command(update, context) # Show main menu again
+            # Lưu lịch sử chơi chi tiết vào profile user
+            p['play_history'].append({
+                "choice": choice,
+                "amount": amt,
+                "result": result_str,
+                "win": win,
+                "change": change_str
+            })
+            if len(p['play_history']) > 15: p['play_history'].pop(0)
             
-        except ValueError:
-            await update.message.reply_text("⚠️ Vui lòng nhập một số tiền hợp lệ!")
+            save_data(DATA_FILE, players)
+            await msg.edit_text(res_msg + f"\n💰 Dư: `{p['balance']:,}`", parse_mode='Markdown')
+            await update.message.reply_text("🎲 Mời bạn đặt tiếp lượt mới:", reply_markup=get_game_keyboard())
+            return
+        except: return
+
+    # --- NẠP TIỀN ---
+    if text == '💳 Nạp Tiền':
+        user_states[uid] = {'state': 'NAP_AMT'}
+        return await update.message.reply_text("🏦 Chọn hoặc nhập số tiền muốn nạp:", reply_markup=get_deposit_keyboard())
+
+    if uid in user_states and user_states[uid]['state'] == 'NAP_AMT':
+        try:
+            amt_text = "".join(filter(str.isdigit, text))
+            if not amt_text: return
+            amt = int(amt_text)
+            if amt < 10000: return await update.message.reply_text("❌ Tối thiểu nạp 10,000 VNĐ.")
+            
+            url = f"https://img.vietqr.io/image/{BANK_NAME}-{BANK_STK}-compact.jpg?amount={amt}&addInfo=NAP%20{uid}"
+            await update.message.reply_photo(
+                url, 
+                caption=f"✅ Lệnh nạp: `{amt:,}` VNĐ\n\n📌 Nội dung chuyển khoản: `NAP {uid}`\n\n⚠️ Lưu ý: Phải ghi đúng nội dung để được cộng tiền tự động!",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại Menu')]], resize_keyboard=True),
+                parse_mode='Markdown'
+            )
+            for aid in ADMIN_IDS:
+                kb = [[InlineKeyboardButton("✅ Duyệt", callback_data=f"ap_{uid}_{amt}")]]
+                await context.bot.send_message(aid, f"🔔 YÊU CẦU NẠP: {user.first_name}\n🆔 ID: `{uid}`\n💰 Tiền: `{amt:,}`", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+            user_states.pop(uid, None)
+            return
+        except: return
+
+    # --- RÚT TIỀN ---
+    if text == '🏧 Rút Tiền':
+        user_states[uid] = {'state': 'RUT_AMT'}
+        return await update.message.reply_text("🏦 Nhập số tiền rút (Min 50k):", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
+
+    if uid in user_states and user_states[uid]['state'] == 'RUT_AMT':
+        try:
+            amt = int("".join(filter(str.isdigit, text)))
+            if amt < 50000 or p['balance'] < amt: return await update.message.reply_text("❌ Số dư không đủ hoặc số tiền quá nhỏ.")
+            user_states[uid] = {'state': 'RUT_INFO', 'amt': amt}
+            return await update.message.reply_text("💳 Nhập thông tin nhận tiền:\n(STK - Ngân hàng - Tên chủ thẻ)", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
+        except: return
+
+    if uid in user_states and user_states[uid]['state'] == 'RUT_INFO':
+        amt = user_states[uid]['amt']
+        p['balance'] -= amt
+        save_data(DATA_FILE, players)
+        await update.message.reply_text("✅ Yêu cầu rút tiền đã được gửi tới Admin.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại Menu')]], resize_keyboard=True))
+        for aid in ADMIN_IDS:
+            kb = [[InlineKeyboardButton("✅ Duyệt", callback_data=f"wd_ok_{uid}_{amt}"), InlineKeyboardButton("❌ Từ chối", callback_data=f"wd_no_{uid}_{amt}")]]
+            await context.bot.send_message(aid, f"⚠️ LỆNH RÚT: {user.first_name}\n💰: `{amt:,}`\n🏦: {text}", reply_markup=InlineKeyboardMarkup(kb))
+        user_states.pop(uid, None)
+        return
+
+    # --- LỊCH SỬ CHƠI CỦA TÔI ---
+    if text == '📝 Lịch Sử Chơi':
+        history = p.get('play_history', [])
+        if not history: 
+            return await update.message.reply_text(" bạn chưa tham gia ván nào.")
+        
+        msg = "📝 **LỊCH SỬ CHƠI GẦN ĐÂY**\n\n"
+        for i, h in enumerate(reversed(history)):
+            status = "✅ Thắng" if h['win'] else "❌ Thua"
+            msg += f"{i+1}. **{h['choice']}** | Cược: `{h['amount']:,}`\n"
+            msg += f"   KQ: `{h['result']}` | {status} ({h['change']})\n\n"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
+    if text == '📊 Tài Khoản':
+        await update.message.reply_text(f"📑 **TÀI KHOẢN**\n\n👤: {p['username']}\n🆔: `{uid}`\n💰: `{p['balance']:,}` VNĐ", parse_mode='Markdown')
+
+# --- QUẢN TRỊ VIÊN ---
+async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS: return
+    try:
+        tid, amt = context.args[0], int(context.args[1])
+        if tid in players:
+            players[tid]['balance'] = amt
+            save_data(DATA_FILE, players)
+            await update.message.reply_text(f"✅ Đã cập nhật số dư ID {tid} thành {amt:,}")
+        else: await update.message.reply_text("❌ Không tìm thấy người chơi.")
+    except: await update.message.reply_text("HD: `/setbal ID SoTien`")
+
+async def cb_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data.split("_")
+    action = data[0]
+    
+    if action == "admin":
+        sub = data[1]
+        if sub == "stats":
+            total_users = len(players)
+            total_balance = sum(u['balance'] for u in players.values())
+            await query.answer("Đã cập nhật!")
+            await query.edit_message_text(
+                f"🛠 **HỆ THỐNG QUẢN TRỊ**\n\n👥 Tổng người chơi: `{total_users}`\n💵 Tổng số dư: `{total_balance:,}` VNĐ",
+                reply_markup=query.message.reply_markup, parse_mode='Markdown'
+            )
+        elif sub == "list":
+            user_list = "\n".join([f"• {u['username']} (`{uid}`): `{u['balance']:,}`" for uid, u in list(players.items())[:15]])
+            await query.message.reply_text(f"👥 **NGƯỜI CHƠI:**\n\n{user_list}", parse_mode='Markdown')
+            await query.answer()
+        elif sub == "setbal":
+            await query.message.reply_text("Sử dụng: `/setbal [ID] [Số tiền]`")
+            await query.answer()
+        return
+
+    if action == "ap":
+        tid, amt = data[1], int(data[2])
+        players[tid]['balance'] += amt
+        save_data(DATA_FILE, players)
+        await query.edit_message_text(f"✅ Đã cộng +{amt:,} cho ID {tid}")
+        try: await context.bot.send_message(tid, f"💰 Tài khoản đã được cộng +{amt:,} VNĐ. Chúc bạn chơi vui vẻ!")
+        except: pass
+    elif action == "wd":
+        res, target_id, real_amt = data[1], data[2], int(data[3])
+        if res == "ok":
+            await query.edit_message_text(f"✅ Đã duyệt rút {real_amt:,} cho {target_id}")
+            try: await context.bot.send_message(target_id, f"🏧 Rút tiền thành công: {real_amt:,} VNĐ")
+            except: pass
+        else:
+            players[target_id]['balance'] += real_amt
+            save_data(DATA_FILE, players)
+            await query.edit_message_text(f"❌ Đã từ chối lệnh rút của {target_id}")
+            try: await context.bot.send_message(target_id, f"⚠️ Admin từ chối lệnh rút. Tiền đã được hoàn lại tài khoản.")
+            except: pass
 
 if __name__ == '__main__':
-    if not BOT_TOKEN:
-        print("LỖI: Chưa có BOT_TOKEN!")
-    else:
-        app = ApplicationBuilder().token(BOT_TOKEN).build()
-        app.add_handler(CommandHandler("start", start_command))
-        app.add_handler(CallbackQueryHandler(callback_router))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
-        print("Bot Casino v5 is running...")
-        app.run_polling()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('setbal', set_balance)) 
+    app.add_handler(CallbackQueryHandler(cb_query))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
+    app.run_polling()
