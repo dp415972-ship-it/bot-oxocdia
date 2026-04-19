@@ -94,20 +94,29 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states.pop(uid, None)
         return await start(update, context)
 
-    # --- XỬ LÝ NÚT QUẢN TRỊ (QUAN TRỌNG) ---
+    # --- XỬ LÝ NÚT QUẢN TRỊ ---
     if text == '🛠 Quản Trị':
         if user.id not in ADMIN_IDS:
             return await update.message.reply_text("❌ Bạn không có quyền Admin.")
         
         total_users = len(players)
         total_balance = sum(u['balance'] for u in players.values())
+        
+        # Tạo Menu Admin bằng nút bấm Inline
+        keyboard = [
+            [InlineKeyboardButton("👥 Danh Sách Người Chơi", callback_data="admin_list")],
+            [InlineKeyboardButton("💰 Cộng/Trừ Tiền", callback_data="admin_setbal")],
+            [InlineKeyboardButton("📊 Làm Mới Thống Kê", callback_data="admin_stats")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         msg = (
             "🛠 **HỆ THỐNG QUẢN TRỊ**\n\n"
             f"👥 Tổng người chơi: `{total_users}`\n"
             f"💵 Tổng số dư khách: `{total_balance:,}` VNĐ\n\n"
-            "Để cộng tiền: `/setbal ID SoTien`"
+            "Chọn một chức năng bên dưới để điều hành:"
         )
-        return await update.message.reply_text(msg, parse_mode='Markdown')
+        return await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
 
     # Chơi Game
     if text == '🎮 Chơi Game':
@@ -209,9 +218,31 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data.split("_")
-    action, tid, amt = data[0], data[1], int(data[2])
+    action = data[0]
     
+    # Xử lý các chức năng Admin mới
+    if action == "admin":
+        sub = data[1]
+        if sub == "stats":
+            total_users = len(players)
+            total_balance = sum(u['balance'] for u in players.values())
+            await query.answer("Đã làm mới thống kê!")
+            await query.edit_message_text(
+                f"🛠 **HỆ THỐNG QUẢN TRỊ** (Updated)\n\n👥 Tổng người chơi: `{total_users}`\n💵 Tổng số dư khách: `{total_balance:,}` VNĐ",
+                reply_markup=query.message.reply_markup, parse_mode='Markdown'
+            )
+        elif sub == "list":
+            user_list = "\n".join([f"• {u['username']} (ID: `{uid}`): `{u['balance']:,}`" for uid, u in list(players.items())[:10]])
+            await query.message.reply_text(f"👥 **DANH SÁCH 10 NGƯỜI CHƠI MỚI:**\n\n{user_list}", parse_mode='Markdown')
+            await query.answer()
+        elif sub == "setbal":
+            await query.message.reply_text("Để cộng tiền, hãy dùng lệnh gõ tay:\n`/setbal [ID] [Số_tiền]`")
+            await query.answer()
+        return
+
+    # Duyệt nạp/rút tiền
     if action == "ap":
+        tid, amt = data[1], int(data[2])
         players[tid]['balance'] += amt
         save_data(DATA_FILE, players)
         await query.edit_message_text(f"✅ Đã duyệt nạp {amt:,} cho {tid}")
@@ -234,7 +265,7 @@ async def cb_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('setbal', set_balance)) # Lệnh cộng tiền tay
+    app.add_handler(CommandHandler('setbal', set_balance)) 
     app.add_handler(CallbackQueryHandler(cb_query))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
     app.run_polling()
