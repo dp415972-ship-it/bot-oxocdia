@@ -39,8 +39,15 @@ user_states = {}
 def get_player(user):
     uid = str(user.id)
     if uid not in players:
-        players[uid] = {"id": user.id, "username": user.username or user.first_name, "balance": INITIAL_BALANCE}
+        players[uid] = {
+            "id": user.id, 
+            "username": user.username or user.first_name, 
+            "balance": INITIAL_BALANCE,
+            "play_history": [] # Thêm mảng lưu lịch sử chơi riêng
+        }
         save_data(DATA_FILE, players)
+    if "play_history" not in players[uid]:
+        players[uid]["play_history"] = []
     return players[uid]
 
 # --- LOGIC GAME ---
@@ -57,9 +64,12 @@ def run_logic():
     elif reds == 0: detail = "4trang"
     elif reds == 1: detail = "3trang1do"
     elif reds == 3: detail = "3do1trang"
+    
+    # Lịch sử cầu chung (vẫn giữ để tính toán nếu cần)
     game_history.append({"result": "".join(res), "outcome": outcome})
     if len(game_history) > 100: game_history.pop(0)
     save_data(HISTORY_FILE, game_history)
+    
     return res, outcome, detail
 
 # --- BÀN PHÍM ---
@@ -87,7 +97,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states.pop(uid, None)
     
     kb = [
-        [KeyboardButton('🎮 Chơi Game'), KeyboardButton('📊 Lịch Sử')],
+        [KeyboardButton('🎮 Chơi Game'), KeyboardButton('📝 Lịch Sử Chơi')],
         [KeyboardButton('💳 Nạp Tiền'), KeyboardButton('🏧 Rút Tiền')],
         [KeyboardButton('📊 Tài Khoản'), KeyboardButton('📜 Hướng Dẫn')]
     ]
@@ -153,12 +163,28 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res, out, det = run_logic()
             win = (BET_MAP[choice] == out or BET_MAP[choice] == det)
             
+            result_str = "".join(res)
+            change_str = ""
+            
             res_msg = f"Kết quả: [ {' '.join(res)} ]\n➜ **{out.upper()}**\n"
             if win:
                 win_amt = int(amt * MULTIPLIERS[choice])
                 p['balance'] += win_amt
                 res_msg += f"🎉 THẮNG: `+{win_amt:,}`"
-            else: res_msg += f"💀 THUA: `-{amt:,}`"
+                change_str = f"+{(win_amt - amt):,}"
+            else:
+                res_msg += f"💀 THUA: `-{amt:,}`"
+                change_str = f"-{amt:,}"
+            
+            # Lưu lịch sử chơi chi tiết vào profile user
+            p['play_history'].append({
+                "choice": choice,
+                "amount": amt,
+                "result": result_str,
+                "win": win,
+                "change": change_str
+            })
+            if len(p['play_history']) > 15: p['play_history'].pop(0)
             
             save_data(DATA_FILE, players)
             await msg.edit_text(res_msg + f"\n💰 Dư: `{p['balance']:,}`", parse_mode='Markdown')
@@ -185,7 +211,6 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại Menu')]], resize_keyboard=True),
                 parse_mode='Markdown'
             )
-            # Thông báo cho admin
             for aid in ADMIN_IDS:
                 kb = [[InlineKeyboardButton("✅ Duyệt", callback_data=f"ap_{uid}_{amt}")]]
                 await context.bot.send_message(aid, f"🔔 YÊU CẦU NẠP: {user.first_name}\n🆔 ID: `{uid}`\n💰 Tiền: `{amt:,}`", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
@@ -217,10 +242,19 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states.pop(uid, None)
         return
 
-    if text == '📊 Lịch Sử':
-        if not game_history: return await update.message.reply_text("Chưa có dữ liệu lịch sử.")
-        icons = ["🔴" if h['outcome'] == 'chan' else "⚪️" for h in game_history[-20:]]
-        await update.message.reply_text(f"📊 20 phiên gần nhất:\n\n{' '.join(icons)}")
+    # --- LỊCH SỬ CHƠI CỦA TÔI ---
+    if text == '📝 Lịch Sử Chơi':
+        history = p.get('play_history', [])
+        if not history: 
+            return await update.message.reply_text(" bạn chưa tham gia ván nào.")
+        
+        msg = "📝 **LỊCH SỬ CHƠI GẦN ĐÂY**\n\n"
+        for i, h in enumerate(reversed(history)):
+            status = "✅ Thắng" if h['win'] else "❌ Thua"
+            msg += f"{i+1}. **{h['choice']}** | Cược: `{h['amount']:,}`\n"
+            msg += f"   KQ: `{h['result']}` | {status} ({h['change']})\n\n"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
 
     if text == '📊 Tài Khoản':
         await update.message.reply_text(f"📑 **TÀI KHOẢN**\n\n👤: {p['username']}\n🆔: `{uid}`\n💰: `{p['balance']:,}` VNĐ", parse_mode='Markdown')
