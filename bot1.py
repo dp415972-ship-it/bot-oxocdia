@@ -11,7 +11,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 # Bạn cần thêm biến 'BOT_TOKEN' vào phần Variables của nhà cung cấp hosting.
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-ADMIN_IDS = 8393067202
+ADMIN_IDS = [8393067202]
 BANK_STK = '144881'
 BANK_NAME = 'MBBank'
 
