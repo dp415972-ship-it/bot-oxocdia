@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 
 # --- CẤU HÌNH ---
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8747823218:AAE5clUs5rSf-bF_MTQkxlnFiWk3LUUS8AY')
-ADMIN_IDS = [8393067202] # Chắc chắn là có dấu ngoặc vuông []
+ADMIN_IDS = [8393067202] 
 BANK_STK = '144881'
 BANK_NAME = 'MBBank'
 
@@ -62,13 +62,21 @@ def run_logic():
     save_data(HISTORY_FILE, game_history)
     return res, outcome, detail
 
-# --- BÀN PHÍM CHƠI GAME ---
+# --- BÀN PHÍM ---
 def get_game_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton('Chẵn'), KeyboardButton('Lẻ')],
         [KeyboardButton('3 Trắng 1 Đỏ (x3.5)'), KeyboardButton('3 Đỏ 1 Trắng (x3.5)')],
         [KeyboardButton('4 Trắng (x12)'), KeyboardButton('4 Đỏ (x12)')],
         [KeyboardButton('🔙 Quay lại')]
+    ], resize_keyboard=True)
+
+def get_deposit_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton('50,000'), KeyboardButton('100,000')],
+        [KeyboardButton('200,000'), KeyboardButton('500,000')],
+        [KeyboardButton('1,000,000'), KeyboardButton('2,000,000')],
+        [KeyboardButton('🔙 Quay lại Menu')]
     ], resize_keyboard=True)
 
 # --- HANDLERS ---
@@ -102,36 +110,29 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states.pop(uid, None)
         return await start(update, context)
 
-    # --- XỬ LÝ NÚT QUẢN TRỊ ---
+    # --- QUẢN TRỊ ---
     if text == '🛠 Quản Trị':
         if user.id not in ADMIN_IDS:
             return await update.message.reply_text("❌ Bạn không có quyền Admin.")
-        
         total_users = len(players)
         total_balance = sum(u['balance'] for u in players.values())
-        
         keyboard = [
             [InlineKeyboardButton("👥 Danh Sách Người Chơi", callback_data="admin_list")],
             [InlineKeyboardButton("💰 Cộng/Trừ Tiền", callback_data="admin_setbal")],
             [InlineKeyboardButton("📊 Làm Mới Thống Kê", callback_data="admin_stats")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        msg = (
-            "🛠 **HỆ THỐNG QUẢN TRỊ**\n\n"
-            f"👥 Tổng người chơi: `{total_users}`\n"
-            f"💵 Tổng số dư khách: `{total_balance:,}` VNĐ\n\n"
-            "Chọn một chức năng bên dưới để điều hành:"
+        return await update.message.reply_text(
+            f"🛠 **HỆ THỐNG QUẢN TRỊ**\n\n👥 Tổng người chơi: `{total_users}`\n💵 Tổng số dư khách: `{total_balance:,}` VNĐ",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
         )
-        return await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
 
-    # Chơi Game
+    # --- CHƠI GAME ---
     if text == '🎮 Chơi Game':
         return await update.message.reply_text("🎲 Chọn cửa đặt:", reply_markup=get_game_keyboard())
 
     if text in MULTIPLIERS:
         user_states[uid] = {'state': 'BET_AMT', 'choice': text}
-        return await update.message.reply_text(f"🎯 Cửa: {text}\n💰 Nhập tiền cược:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
+        return await update.message.reply_text(f"🎯 Cửa: {text}\n💰 Nhập tiền cược (Ví dụ: 50000):", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
 
     if uid in user_states and user_states[uid]['state'] == 'BET_AMT':
         try:
@@ -139,13 +140,12 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not amt_text: return
             amt = int(amt_text)
             choice = user_states[uid]['choice']
-            
             if p['balance'] < amt: 
                 return await update.message.reply_text("❌ Không đủ tiền!", reply_markup=get_game_keyboard())
             
             p['balance'] -= amt
             save_data(DATA_FILE, players)
-            user_states.pop(uid, None) # Xóa trạng thái nhập tiền để sẵn sàng cho lượt tiếp theo
+            user_states.pop(uid, None)
             
             msg = await update.message.reply_text(f"🎲 Đang xóc...")
             await asyncio.sleep(1.2)
@@ -161,31 +161,39 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: res_msg += f"💀 THUA: `-{amt:,}`"
             
             save_data(DATA_FILE, players)
-            # Sau khi trả kết quả, gửi lại bàn phím chọn cửa ngay lập tức
             await msg.edit_text(res_msg + f"\n💰 Dư: `{p['balance']:,}`", parse_mode='Markdown')
             await update.message.reply_text("🎲 Mời bạn đặt tiếp lượt mới:", reply_markup=get_game_keyboard())
             return
-        except Exception as e:
-            logger.error(f"Error in betting: {e}")
-            return
+        except: return
 
-    # Nạp/Rút (Giữ nguyên logic cũ)
+    # --- NẠP TIỀN ---
     if text == '💳 Nạp Tiền':
-        user_states[uid] = {'state': 'NAP'}
-        return await update.message.reply_text("🏦 Nhập số tiền nạp:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
+        user_states[uid] = {'state': 'NAP_AMT'}
+        return await update.message.reply_text("🏦 Chọn hoặc nhập số tiền muốn nạp:", reply_markup=get_deposit_keyboard())
 
-    if uid in user_states and user_states[uid]['state'] == 'NAP':
+    if uid in user_states and user_states[uid]['state'] == 'NAP_AMT':
         try:
-            amt = int("".join(filter(str.isdigit, text)))
+            amt_text = "".join(filter(str.isdigit, text))
+            if not amt_text: return
+            amt = int(amt_text)
+            if amt < 10000: return await update.message.reply_text("❌ Tối thiểu nạp 10,000 VNĐ.")
+            
             url = f"https://img.vietqr.io/image/{BANK_NAME}-{BANK_STK}-compact.jpg?amount={amt}&addInfo=NAP%20{uid}"
-            await update.message.reply_photo(url, caption=f"✅ Lệnh nạp: `{amt:,}`\nNội dung: `NAP {uid}`", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại Menu')]], resize_keyboard=True))
+            await update.message.reply_photo(
+                url, 
+                caption=f"✅ Lệnh nạp: `{amt:,}` VNĐ\n\n📌 Nội dung chuyển khoản: `NAP {uid}`\n\n⚠️ Lưu ý: Phải ghi đúng nội dung để được cộng tiền tự động!",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại Menu')]], resize_keyboard=True),
+                parse_mode='Markdown'
+            )
+            # Thông báo cho admin
             for aid in ADMIN_IDS:
                 kb = [[InlineKeyboardButton("✅ Duyệt", callback_data=f"ap_{uid}_{amt}")]]
-                await context.bot.send_message(aid, f"🔔 NẠP: {user.first_name} | ID: `{uid}` | `{amt:,}`", reply_markup=InlineKeyboardMarkup(kb))
+                await context.bot.send_message(aid, f"🔔 YÊU CẦU NẠP: {user.first_name}\n🆔 ID: `{uid}`\n💰 Tiền: `{amt:,}`", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
             user_states.pop(uid, None)
             return
         except: return
 
+    # --- RÚT TIỀN ---
     if text == '🏧 Rút Tiền':
         user_states[uid] = {'state': 'RUT_AMT'}
         return await update.message.reply_text("🏦 Nhập số tiền rút (Min 50k):", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
@@ -193,31 +201,31 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid in user_states and user_states[uid]['state'] == 'RUT_AMT':
         try:
             amt = int("".join(filter(str.isdigit, text)))
-            if amt < 50000 or p['balance'] < amt: return await update.message.reply_text("❌ Không hợp lệ.")
+            if amt < 50000 or p['balance'] < amt: return await update.message.reply_text("❌ Số dư không đủ hoặc số tiền quá nhỏ.")
             user_states[uid] = {'state': 'RUT_INFO', 'amt': amt}
-            return await update.message.reply_text("💳 Nhập STK - Bank - Tên:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
+            return await update.message.reply_text("💳 Nhập thông tin nhận tiền:\n(STK - Ngân hàng - Tên chủ thẻ)", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại')]], resize_keyboard=True))
         except: return
 
     if uid in user_states and user_states[uid]['state'] == 'RUT_INFO':
         amt = user_states[uid]['amt']
         p['balance'] -= amt
         save_data(DATA_FILE, players)
-        await update.message.reply_text("✅ Đã gửi yêu cầu rút.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại Menu')]], resize_keyboard=True))
+        await update.message.reply_text("✅ Yêu cầu rút tiền đã được gửi tới Admin.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton('🔙 Quay lại Menu')]], resize_keyboard=True))
         for aid in ADMIN_IDS:
             kb = [[InlineKeyboardButton("✅ Duyệt", callback_data=f"wd_ok_{uid}_{amt}"), InlineKeyboardButton("❌ Từ chối", callback_data=f"wd_no_{uid}_{amt}")]]
-            await context.bot.send_message(aid, f"⚠️ RÚT: {user.first_name}\n💰: `{amt:,}`\n🏦: {text}", reply_markup=InlineKeyboardMarkup(kb))
+            await context.bot.send_message(aid, f"⚠️ LỆNH RÚT: {user.first_name}\n💰: `{amt:,}`\n🏦: {text}", reply_markup=InlineKeyboardMarkup(kb))
         user_states.pop(uid, None)
         return
 
     if text == '📊 Lịch Sử':
-        if not game_history: return await update.message.reply_text("Chưa có dữ liệu.")
+        if not game_history: return await update.message.reply_text("Chưa có dữ liệu lịch sử.")
         icons = ["🔴" if h['outcome'] == 'chan' else "⚪️" for h in game_history[-20:]]
-        await update.message.reply_text(f"Lịch sử:\n{' '.join(icons)}")
+        await update.message.reply_text(f"📊 20 phiên gần nhất:\n\n{' '.join(icons)}")
 
     if text == '📊 Tài Khoản':
-        await update.message.reply_text(f"👤: {p['username']}\n🆔: `{uid}`\n💰: `{p['balance']:,}` VNĐ", parse_mode='Markdown')
+        await update.message.reply_text(f"📑 **TÀI KHOẢN**\n\n👤: {p['username']}\n🆔: `{uid}`\n💰: `{p['balance']:,}` VNĐ", parse_mode='Markdown')
 
-# --- LỆNH ADMIN ---
+# --- QUẢN TRỊ VIÊN ---
 async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
     try:
@@ -225,8 +233,8 @@ async def set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tid in players:
             players[tid]['balance'] = amt
             save_data(DATA_FILE, players)
-            await update.message.reply_text(f"✅ Đã đặt số dư ID {tid} thành {amt:,}")
-        else: await update.message.reply_text("❌ ID không tồn tại.")
+            await update.message.reply_text(f"✅ Đã cập nhật số dư ID {tid} thành {amt:,}")
+        else: await update.message.reply_text("❌ Không tìm thấy người chơi.")
     except: await update.message.reply_text("HD: `/setbal ID SoTien`")
 
 async def cb_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -239,17 +247,17 @@ async def cb_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sub == "stats":
             total_users = len(players)
             total_balance = sum(u['balance'] for u in players.values())
-            await query.answer("Đã làm mới thống kê!")
+            await query.answer("Đã cập nhật!")
             await query.edit_message_text(
-                f"🛠 **HỆ THỐNG QUẢN TRỊ** (Updated)\n\n👥 Tổng người chơi: `{total_users}`\n💵 Tổng số dư khách: `{total_balance:,}` VNĐ",
+                f"🛠 **HỆ THỐNG QUẢN TRỊ**\n\n👥 Tổng người chơi: `{total_users}`\n💵 Tổng số dư: `{total_balance:,}` VNĐ",
                 reply_markup=query.message.reply_markup, parse_mode='Markdown'
             )
         elif sub == "list":
-            user_list = "\n".join([f"• {u['username']} (ID: `{uid}`): `{u['balance']:,}`" for uid, u in list(players.items())[:10]])
-            await query.message.reply_text(f"👥 **DANH SÁCH 10 NGƯỜI CHƠI MỚI:**\n\n{user_list}", parse_mode='Markdown')
+            user_list = "\n".join([f"• {u['username']} (`{uid}`): `{u['balance']:,}`" for uid, u in list(players.items())[:15]])
+            await query.message.reply_text(f"👥 **NGƯỜI CHƠI:**\n\n{user_list}", parse_mode='Markdown')
             await query.answer()
         elif sub == "setbal":
-            await query.message.reply_text("Để cộng tiền, hãy dùng lệnh gõ tay:\n`/setbal [ID] [Số_tiền]`")
+            await query.message.reply_text("Sử dụng: `/setbal [ID] [Số tiền]`")
             await query.answer()
         return
 
@@ -257,21 +265,20 @@ async def cb_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid, amt = data[1], int(data[2])
         players[tid]['balance'] += amt
         save_data(DATA_FILE, players)
-        await query.edit_message_text(f"✅ Đã duyệt nạp {amt:,} cho {tid}")
-        try: await context.bot.send_message(tid, f"💰 Đã cộng +{amt:,} VNĐ")
+        await query.edit_message_text(f"✅ Đã cộng +{amt:,} cho ID {tid}")
+        try: await context.bot.send_message(tid, f"💰 Tài khoản đã được cộng +{amt:,} VNĐ. Chúc bạn chơi vui vẻ!")
         except: pass
     elif action == "wd":
-        sub = data[1]
-        target_id, real_amt = data[2], int(data[3])
-        if sub == "ok":
+        res, target_id, real_amt = data[1], data[2], int(data[3])
+        if res == "ok":
             await query.edit_message_text(f"✅ Đã duyệt rút {real_amt:,} cho {target_id}")
             try: await context.bot.send_message(target_id, f"🏧 Rút tiền thành công: {real_amt:,} VNĐ")
             except: pass
         else:
             players[target_id]['balance'] += real_amt
             save_data(DATA_FILE, players)
-            await query.edit_message_text(f"❌ Từ chối rút. Đã hoàn tiền.")
-            try: await context.bot.send_message(target_id, f"⚠️ Admin từ chối rút. Tiền đã hoàn lại.")
+            await query.edit_message_text(f"❌ Đã từ chối lệnh rút của {target_id}")
+            try: await context.bot.send_message(target_id, f"⚠️ Admin từ chối lệnh rút. Tiền đã được hoàn lại tài khoản.")
             except: pass
 
 if __name__ == '__main__':
